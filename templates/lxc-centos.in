@@ -253,8 +253,6 @@ EOF
 127.0.0.1 localhost 
 $ip ${UTSNAME} $name
 EOF
-    # set the gateway as the nameserver
-    echo "nameserver $gw" >> ${rootfs_path}/etc/resolve.conf
 
     else
     # configure the network using the dhcp
