@@ -28,9 +28,9 @@ lxc.hook.clone = @LXCHOOKDIR@/clonehostname
 # lxc.cap.drop = audit_control    # breaks sshd (set_loginuid failed)
 # lxc.cap.drop = audit_write
 #
-lxc.cap.drop = mac_admin mac_override setfcap setpcap
-lxc.cap.drop = sys_module sys_nice sys_pacct
-lxc.cap.drop = sys_rawio sys_time
+#lxc.cap.drop = mac_admin mac_override setfcap setpcap
+#lxc.cap.drop = sys_module sys_nice sys_pacct
+#lxc.cap.drop = sys_rawio sys_time
 
 # Control Group devices: all denied except those whitelisted
 lxc.cgroup.devices.deny = a
