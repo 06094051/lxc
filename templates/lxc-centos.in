@@ -231,6 +231,32 @@ configure_centos()
         )
     fi
 
+    if [ $use_static_ip == "yes" ];then
+    # configure the network using static ip
+    cat <<EOF > ${rootfs_path}/etc/sysconfig/network-scripts/ifcfg-eth0
+DEVICE=eth0
+BOOTPROTO=none
+ONBOOT=yes
+HOSTNAME=${UTSNAME}
+NM_CONTROLLED=no
+TYPE=Ethernet
+MTU=${MTU}
+EOF
+    # set static route, add the default gateway
+    cat <<EOF > ${rootfs_path}/etc/sysconfig/static-routes
+any net default gw ${gw}
+EOF
+
+    # set minimal hosts, don't resolve the hostname to 127.0.0.1
+    # resolve it to the static ip
+    cat <<EOF > $rootfs_path/etc/hosts
+127.0.0.1 localhost 
+$ip ${UTSNAME} $name
+EOF
+    # set the gateway as the nameserver
+    echo "nameserver $gw" >> ${rootfs_path}/etc/resolve.conf
+
+    else
     # configure the network using the dhcp
     cat <<EOF > ${rootfs_path}/etc/sysconfig/network-scripts/ifcfg-eth0
 DEVICE=eth0
@@ -242,16 +268,18 @@ TYPE=Ethernet
 MTU=${MTU}
 EOF
 
+    # set minimal hosts
+    cat <<EOF > $rootfs_path/etc/hosts
+127.0.0.1 localhost $name
+EOF
+    fi
+
     # set the hostname
     cat <<EOF > ${rootfs_path}/etc/sysconfig/network
 NETWORKING=yes
 HOSTNAME=${UTSNAME}
 EOF
 
-    # set minimal hosts
-    cat <<EOF > $rootfs_path/etc/hosts
-127.0.0.1 localhost $name
-EOF
 
     # set minimal fstab
     cat <<EOF > $rootfs_path/etc/fstab
@@ -372,7 +400,7 @@ download_centos()
     # download a mini centos into a cache
     echo "Downloading centos minimal ..."
     YUM="yum --installroot $INSTALL_ROOT -y --nogpgcheck"
-    PKG_LIST="yum initscripts passwd rsyslog vim-minimal openssh-server openssh-clients dhclient chkconfig rootfiles policycoreutils"
+    PKG_LIST="yum initscripts passwd rsyslog vim-minimal openssh-server openssh-clients dhclient chkconfig rootfiles policycoreutils wget tar sudo zip unzip"
 
     # use temporary repository definition
     REPO_FILE=$INSTALL_ROOT/etc/yum.repos.d/lxc-centos-temp.repo
@@ -561,6 +589,11 @@ lxc.rootfs = $rootfs_path
     done < $config_path/config.def
 
     rm -f $config_path/config.def
+    
+    # append the container ip address
+    if [ $use_static_ip == "yes " ];then
+      echo "lxc.network.ipv4 = ${ip}/24" >> $config_path/config
+    fi
 
     if [ -e "@LXCTEMPLATECONFIG@/centos.common.conf" ]; then
         echo "
@@ -637,19 +670,24 @@ Optional args:
   -R,--release      Centos release for the new container. if the host is Centos, then it will defaultto the host's release.
      --fqdn         fully qualified domain name (FQDN) for DNS and system naming
      --repo         repository to use (url)
+     --ip           specify a static ip, must use with --gw option
+     --gw           specify the default gateway, required if --ip option is used.
   -a,--arch         Define what arch the container will be [i686,x86_64]
   -h,--help         print this help
 EOF
     return 0
 }
 
-options=$(getopt -o a:hp:n:cR: -l help,path:,rootfs:,name:,clean,release:,repo:,arch:,fqdn: -- "$@")
+options=$(getopt -o a:hp:n:cR: -l help,path:,rootfs:,name:,clean,release:,repo:,arch:,fqdn:ip:,gw: -- "$@")
 if [ $? -ne 0 ]; then
     usage $(basename $0)
     exit 1
 fi
 
 arch=$(arch)
+use_static_ip=no
+ip=
+gw=
 eval set -- "$options"
 while true
 do
@@ -663,6 +701,8 @@ do
 	--repo)		repo="$2"; shift 2;;
         -a|--arch)      newarch=$2; shift 2;;
         --fqdn)         utsname=$2; shift 2;;
+        --ip)           use_static_ip=yes; ip=$2; shift 2;;
+        --gw)           gw=$2; shift 2;;
         --)             shift 1; break ;;
         *)              break ;;
     esac
@@ -671,6 +711,12 @@ done
 if [ ! -z "$clean" -a -z "$path" ]; then
     clean || exit 1
     exit 0
+fi
+
+if [ ! -z "$ip" -a -z "$gw" ];then
+    echo "Missing the default gateway, use --gw option to specify the default gateway"
+    usage $0
+    exit 1
 fi
 
 basearch=${arch}
