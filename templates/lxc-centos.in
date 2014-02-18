@@ -365,8 +365,11 @@ EOF
     fi
 
     echo "root:$root_password" | chroot $rootfs_path chpasswd
-    # Also set this password as expired to force the user to change it!
-    chroot $rootfs_path passwd -e root
+    
+    if [ $expire_root_passwd == "yes" ];then
+        # Set this password as expired to force the user to change it!
+        chroot $rootfs_path passwd -e root
+    fi
 
     # This will need to be enhanced for CentOS 7 when systemd
     # comes into play...   /\/\|=mhw=|\/\/
@@ -398,7 +401,7 @@ download_centos()
     # download a mini centos into a cache
     echo "Downloading centos minimal ..."
     YUM="yum --installroot $INSTALL_ROOT -y --nogpgcheck"
-    PKG_LIST="yum initscripts passwd rsyslog vim-minimal openssh-server openssh-clients dhclient chkconfig rootfiles policycoreutils wget tar sudo zip unzip"
+    PKG_LIST="yum initscripts passwd rsyslog vim-minimal openssh-server openssh-clients dhclient chkconfig rootfiles policycoreutils wget tar sudo zip unzip which"
 
     # use temporary repository definition
     REPO_FILE=$INSTALL_ROOT/etc/yum.repos.d/lxc-centos-temp.repo
@@ -670,13 +673,33 @@ Optional args:
      --repo         repository to use (url)
      --ip           specify a static ip, must use with --gw option
      --gw           specify the default gateway, required if --ip option is used.
+  -E,               don't set the root password expired
+  -s,               Copy the current ssh public key to the authorized host list of the container
   -a,--arch         Define what arch the container will be [i686,x86_64]
   -h,--help         print this help
 EOF
     return 0
 }
 
-options=$(getopt -o a:hp:n:cR: -l help,path:,rootfs:,name:,clean,release:,repo:,arch:,fqdn:,ip:,gw: -- "$@")
+copy_ssh_key_to_container()
+{
+    # create the .ssh folder and set permission
+    container_ssh_dir=${rootfs_path}/root/.ssh
+    if [ ! -d $container_ssh_dir ];then
+        mkdir -p $container_ssh_dir
+        chmod 700 $container_ssh_dir
+    fi
+    
+    # copy the public key to authorized_keys 
+    my_ssh_id=$HOME/.ssh/id_rsa.pub
+    if [ -f $my_ssh_id ];then
+        cat $my_ssh_id >> $container_ssh_dir/authorized_keys
+    else
+        echo "No public key found under $HOME/.ssh folder."
+    fi
+}
+
+options=$(getopt -o a:hp:n:cR:Es -l help,path:,rootfs:,name:,clean,release:,repo:,arch:,fqdn:,ip:,gw: -- "$@")
 if [ $? -ne 0 ]; then
     usage $(basename $0)
     exit 1
@@ -686,6 +709,8 @@ arch=$(arch)
 use_static_ip=no
 ip=
 gw=
+expire_root_passwd=yes
+copy_ssh_id=no
 eval set -- "$options"
 while true
 do
@@ -696,11 +721,13 @@ do
         -n|--name)      name=$2; shift 2;;
         -c|--clean)     clean=$2; shift 2;;
         -R|--release)   release=$2; shift 2;;
-	--repo)		repo="$2"; shift 2;;
+	    --repo) 		repo="$2"; shift 2;;
         -a|--arch)      newarch=$2; shift 2;;
         --fqdn)         utsname=$2; shift 2;;
         --ip)           use_static_ip=yes; ip=$2; shift 2;;
         --gw)           gw=$2; shift 2;;
+        -E)             expire_root_passwd=no; shift 1;;
+        -s)             copy_ssh_id=yes; shift 1;;
         --)             shift 1; break ;;
         *)              break ;;
     esac
@@ -892,6 +919,11 @@ fi
 
 configure_centos_init
 
+# copy the ssh public key to authorized keys in the container
+if [ $copy_ssh_id == "yes" ];then
+    copy_ssh_key_to_container
+fi
+
 if [ ! -z $clean ]; then
     clean || exit 1
     exit 0
@@ -925,13 +957,15 @@ then
 "
     chroot ${rootfs_path} passwd
 else
-    echo "
-The root password is set up as "expired" and will require it to be changed
-at first login, which you should do as soon as possible.  If you lose the
-root password or wish to change it without starting the container, you
-can change it from the host by running the following command (which will
-also reset the expired flag):
+    if [ $expire_root_passwd == "yes" ];then
+	    echo "
+	The root password is set up as "expired" and will require it to be changed
+	at first login, which you should do as soon as possible.  If you lose the
+	root password or wish to change it without starting the container, you
+	can change it from the host by running the following command (which will
+	also reset the expired flag):
 
-        chroot ${rootfs_path} passwd
-"
+		chroot ${rootfs_path} passwd
+	"
+    fi
 fi
