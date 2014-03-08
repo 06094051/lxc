@@ -40,6 +40,16 @@
 #define LXC_LOG_PREFIX_SIZE	32
 #define LXC_LOG_BUFFER_SIZE	512
 
+#ifdef HAVE_TLS
+__thread int lxc_log_fd = -1;
+static __thread char log_prefix[LXC_LOG_PREFIX_SIZE] = "lxc";
+static __thread char *log_fname = NULL;
+/* command line values for logfile or logpriority should always override
+ * values from the configuration file or defaults
+ */
+static __thread int lxc_logfile_specified = 0;
+static __thread int lxc_loglevel_specified = 0;
+#else
 int lxc_log_fd = -1;
 static char log_prefix[LXC_LOG_PREFIX_SIZE] = "lxc";
 static char *log_fname = NULL;
@@ -48,6 +58,7 @@ static char *log_fname = NULL;
  */
 static int lxc_logfile_specified = 0;
 static int lxc_loglevel_specified = 0;
+#endif
 
 lxc_log_define(lxc_log, lxc);
 
@@ -301,14 +312,8 @@ extern int lxc_log_init(const char *name, const char *file,
 		return 0;
 	}
 
-	if (priority) {
-		if (lxc_priority == LXC_LOG_PRIORITY_NOTSET) {
-			ERROR("invalid log priority %s", priority);
-			return -1;
-		}
-
+	if (priority)
 		lxc_priority = lxc_log_priority_to_int(priority);
-	}
 
 	lxc_log_category_lxc.priority = lxc_priority;
 	lxc_log_category_lxc.appender = &log_appender_logfile;
@@ -361,6 +366,16 @@ extern int lxc_log_init(const char *name, const char *file,
 	}
 
 	return ret;
+}
+
+extern void lxc_log_close(void)
+{
+	if (lxc_log_fd == -1)
+		return;
+	close(lxc_log_fd);
+	lxc_log_fd = -1;
+	free(log_fname);
+	log_fname = NULL;
 }
 
 /*

@@ -24,7 +24,7 @@
 #ifndef __LXC_BDEV_H
 #define __LXC_BDEV_H
 /* blockdev operations for:
- * dir, raw, btrfs, overlayfs, aufs, lvm, loop, zfs
+ * aufs, dir, raw, btrfs, overlayfs, aufs, lvm, loop, zfs
  * someday: qemu-nbd, qcow2, qed
  */
 
@@ -48,6 +48,7 @@ struct bdev_specs {
 		char *lv;
 		char *thinpool; // lvm thin pool to use, if any
 	} lvm;
+	char *dir;
 };
 
 struct bdev_ops {
@@ -62,7 +63,7 @@ struct bdev_ops {
 	/* given original mount, rename the paths for cloned container */
 	int (*clone_paths)(struct bdev *orig, struct bdev *new, const char *oldname,
 			const char *cname, const char *oldpath, const char *lxcpath,
-			int snap, uint64_t newsize);
+			int snap, uint64_t newsize, struct lxc_conf *conf);
 	bool can_snapshot;
 };
 
@@ -84,7 +85,7 @@ struct bdev {
 	int lofd;
 };
 
-char *overlayfs_getlower(char *p);
+char *overlay_getlower(char *p);
 
 bool bdev_is_dir(const char *path);
 

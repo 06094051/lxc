@@ -39,7 +39,7 @@ extern void lxc_setup_fs(void);
 extern int get_u16(unsigned short *val, const char *arg, int base);
 extern int mkdir_p(const char *dir, mode_t mode);
 extern void remove_trailing_slashes(char *p);
-extern const char *get_rundir(void);
+extern char *get_rundir(void);
 
 extern const char *lxc_global_config_value(const char *option_name);
 
@@ -272,4 +272,11 @@ inline static bool am_unpriv(void) {
 extern uid_t get_ns_uid(uid_t orig);
 
 extern bool dir_exists(const char *path);
+
+#define FNV1A_64_INIT ((uint64_t)0xcbf29ce484222325ULL)
+uint64_t fnv_64a_buf(void *buf, size_t len, uint64_t hval);
 #endif
+
+int detect_shared_rootfs(void);
+int detect_ramfs_rootfs(void);
+bool on_path(char *cmd);

@@ -167,3 +167,9 @@ int lxc_cgroup_get(const char *filename, char *value, size_t len, const char *na
 		return ops->get(filename, value, len, name, lxcpath);
 	return -1;
 }
+
+void cgroup_disconnect(void)
+{
+	if (ops && ops->disconnect)
+		ops->disconnect();
+}

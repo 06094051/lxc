@@ -28,7 +28,8 @@ AM_CFLAGS=-I$(top_srcdir)/src \
 	-DLXCPATH=\"$(LXCPATH)\" \
 	-DLXC_GLOBAL_CONF=\"$(LXC_GLOBAL_CONF)\" \
 	-DLXCINITDIR=\"$(LXCINITDIR)\" \
-	-DLXC_DEFAULT_CONFIG=\"$(LXC_DEFAULT_CONFIG)\"
+	-DLXC_DEFAULT_CONFIG=\"$(LXC_DEFAULT_CONFIG)\" \
+	-DRUNTIME_PATH=\"$(RUNTIME_PATH)\"
 
 if ENABLE_APPARMOR
 AM_CFLAGS += -DHAVE_APPARMOR
@@ -45,33 +46,34 @@ bin_PROGRAMS = lxc-test-containertests lxc-test-locktests lxc-test-startone \
 	lxc-test-snapshot lxc-test-concurrent lxc-test-may-control \
 	lxc-test-reboot lxc-test-list lxc-test-attach lxc-test-device-add-remove
 
-bin_SCRIPTS = lxc-test-usernic
+bin_SCRIPTS = lxc-test-autostart
 
 if DISTRO_UBUNTU
-bin_SCRIPTS += lxc-test-ubuntu lxc-test-unpriv
+bin_SCRIPTS += lxc-test-usernic lxc-test-ubuntu lxc-test-unpriv
 endif
 
 endif
 
 EXTRA_DIST = \
 	cgpath.c \
+	clonetest.c \
+	concurrent.c \
+	console.c \
 	containertests.c \
 	createtest.c \
 	destroytest.c \
+	device_add_remove.c \
 	get_item.c \
 	getkeys.c \
+	list.c \
 	locktests.c \
 	lxcpath.c \
-	saveconfig.c \
-	shutdowntest.c \
-	clonetest.c \
-	startone.c \
-	console.c \
-	lxc-test-usernic \
-	snapshot.c \
-	concurrent.c \
-	may_control.c \
+	lxc-test-autostart \
 	lxc-test-ubuntu \
 	lxc-test-unpriv \
-	device_add_remove.c \
-	list.c
+	lxc-test-usernic \
+	may_control.c \
+	saveconfig.c \
+	shutdowntest.c \
+	snapshot.c \
+	startone.c

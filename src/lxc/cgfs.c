@@ -1095,8 +1095,11 @@ static struct cgroup_process_info *lxc_cgroup_get_container_info(const char *nam
 
 		/* use the command interface to look for the cgroup */
 		path = lxc_cmd_get_cgroup_path(name, lxcpath, h->subsystems[0]);
-		if (!path)
-			goto out_error;
+		if (!path) {
+			h->used = false;
+			WARN("Not attaching to cgroup %s unknown to %s %s", h->subsystems[0], lxcpath, name);
+			continue;
+		}
 
 		entry = calloc(1, sizeof(struct cgroup_process_info));
 		if (!entry)
@@ -2036,7 +2039,7 @@ static int handle_cgroup_settings(struct cgroup_mount_point *mp,
 			if (r < 1 || buf[0] != '1') {
 				r = lxc_write_to_file(cc_path, "1", 1, false);
 				if (r < 0)
-					SYSERROR("failed to set memory.use_hiararchy to 1; continuing");
+					SYSERROR("failed to set memory.use_hierarchy to 1; continuing");
 			}
 			free(cc_path);
 		}

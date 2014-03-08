@@ -25,14 +25,10 @@
 import _lxc
 import os
 import subprocess
-import stat
 import time
-import warnings
-
-warnings.warn("The python-lxc API isn't yet stable "
-              "and may change at any point in the future.", Warning, 2)
 
 default_config_path = _lxc.get_global_config_item("lxc.lxcpath")
+get_global_config_item = _lxc.get_global_config_item
 version = _lxc.get_version()
 
 
@@ -164,6 +160,26 @@ class Container(_lxc.Container):
 
         if not self.running:
             return False
+
+        if os.path.exists("/sys/class/net/%s/phy80211/name" % name):
+            with open("/sys/class/net/%s/phy80211/name" % name) as fd:
+                phy = fd.read().strip()
+
+            if subprocess.call(['iw', 'phy', phy, 'set', 'netns',
+                                str(self.init_pid)]) != 0:
+                return False
+
+            if destname:
+                def rename_interface(args):
+                    old, new = args
+
+                    return subprocess.call(['ip', 'link', 'set',
+                                            'dev', old, 'name', new])
+
+                return self.attach_wait(rename_interface, (name, destname),
+                                        namespaces=(CLONE_NEWNET)) == 0
+
+            return True
 
         if not destname:
             destname = name

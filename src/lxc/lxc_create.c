@@ -132,7 +132,7 @@ static struct lxc_arguments my_args = {
 	.progname = "lxc-create",
 	.helpfn   = create_helpfn,
 	.help     = "\
---name=NAME [-w] [-r] [-t template] [-P lxcpath]\n\
+--name=NAME -t template [-w] [-r] [-P lxcpath]\n\
 \n\
 lxc-create creates a container\n\
 \n\
@@ -203,6 +203,15 @@ int main(int argc, char *argv[])
 		exit(1);
 	lxc_log_options_no_override();
 
+	if (!my_args.template) {
+		fprintf(stderr, "A template must be specified.\n");
+		fprintf(stderr, "Use \"none\" if you really want a container without a rootfs.\n");
+		exit(1);
+	}
+
+	if (strcmp(my_args.template, "none") == 0)
+		my_args.template = NULL;
+
 	memset(&spec, 0, sizeof(spec));
 	if (!my_args.bdevtype)
 		my_args.bdevtype = "_unset";
@@ -256,8 +265,7 @@ int main(int argc, char *argv[])
 			spec.lvm.thinpool = my_args.thinpool;
 	}
 	if (my_args.dir) {
-		ERROR("--dir is not yet supported");
-		exit(1);
+		spec.dir = my_args.dir;
 	}
 
 	if (strcmp(my_args.bdevtype, "_unset") == 0)

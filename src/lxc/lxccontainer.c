@@ -805,7 +805,7 @@ static struct bdev *do_bdev_create(struct lxc_container *c, const char *type,
 	/* if we are not root, chown the rootfs dir to root in the
 	 * target uidmap */
 
-	if (geteuid() != 0) {
+	if (geteuid() != 0 || (c->lxc_conf && !lxc_list_empty(&c->lxc_conf->id_map))) {
 		if (chown_mapped_root(bdev->dest, c->lxc_conf) < 0) {
 			ERROR("Error chowning %s to container root", bdev->dest);
 			bdev_put(bdev);
@@ -891,13 +891,15 @@ static bool create_run_template(struct lxc_container *c, char *tpath, bool quiet
 
 		src = c->lxc_conf->rootfs.path;
 		/*
-		 * for an overlayfs create, what the user wants is the template to fill
+		 * for an overlay create, what the user wants is the template to fill
 		 * in what will become the readonly lower layer.  So don't mount for
 		 * the template
 		 */
-		if (strncmp(src, "overlayfs:", 10) == 0) {
-			src = overlayfs_getlower(src+10);
-		}
+		if (strncmp(src, "overlayfs:", 10) == 0)
+			src = overlay_getlower(src+10);
+		if (strncmp(src, "aufs:", 5) == 0)
+			src = overlay_getlower(src+5);
+
 		bdev = bdev_init(src, c->lxc_conf->rootfs.mount, NULL);
 		if (!bdev) {
 			ERROR("Error opening rootfs");
@@ -910,7 +912,7 @@ static bool create_run_template(struct lxc_container *c, char *tpath, bool quiet
 				exit(1);
 			}
 			if (detect_shared_rootfs()) {
-				if (mount("", "", NULL, MS_SLAVE|MS_REC, 0)) {
+				if (mount(NULL, "/", NULL, MS_SLAVE|MS_REC, NULL)) {
 					SYSERROR("Failed to make / rslave to run template");
 					ERROR("Continuing...");
 				}
@@ -989,7 +991,7 @@ static bool create_run_template(struct lxc_container *c, char *tpath, bool quiet
 		 * and we append "--mapped-uid x", where x is the mapped uid
 		 * for our geteuid()
 		 */
-		if (geteuid() != 0 && !lxc_list_empty(&conf->id_map)) {
+		if (!lxc_list_empty(&conf->id_map)) {
 			int n2args = 1;
 			char txtuid[20];
 			char txtgid[20];
@@ -1447,7 +1449,7 @@ static inline bool enter_to_ns(struct lxc_container *c) {
 	init_pid = c->init_pid(c);
 
 	/* Switch to new userns */
-	if (geteuid() && access("/proc/self/ns/user", F_OK) == 0) {
+	if ((geteuid() != 0 || (c->lxc_conf && !lxc_list_empty(&c->lxc_conf->id_map))) && access("/proc/self/ns/user", F_OK) == 0) {
 		ret = snprintf(new_userns_path, MAXPATHLEN, "/proc/%d/ns/user", init_pid);
 		if (ret < 0 || ret >= MAXPATHLEN)
 			goto out;
@@ -2496,10 +2498,19 @@ static int clone_update_rootfs(struct clone_update_data *data)
 	if (strcmp(bdev->type, "dir") != 0) {
 		if (unshare(CLONE_NEWNS) < 0) {
 			ERROR("error unsharing mounts");
+			bdev_put(bdev);
 			return -1;
 		}
-		if (bdev->ops->mount(bdev) < 0)
+		if (detect_shared_rootfs()) {
+			if (mount(NULL, "/", NULL, MS_SLAVE|MS_REC, NULL)) {
+				SYSERROR("Failed to make / rslave");
+				ERROR("Continuing...");
+			}
+		}
+		if (bdev->ops->mount(bdev) < 0) {
+			bdev_put(bdev);
 			return -1;
+		}
 	} else { // TODO come up with a better way
 		if (bdev->dest)
 			free(bdev->dest);
@@ -2526,12 +2537,15 @@ static int clone_update_rootfs(struct clone_update_data *data)
 
 		if (run_lxc_hooks(c->name, "clone", conf, c->get_config_path(c), hookargs)) {
 			ERROR("Error executing clone hook for %s", c->name);
+			bdev_put(bdev);
 			return -1;
 		}
 	}
 
 	if (!(flags & LXC_CLONE_KEEPNAME)) {
 		ret = snprintf(path, MAXPATHLEN, "%s/etc/hostname", bdev->dest);
+		bdev_put(bdev);
+
 		if (ret < 0 || ret >= MAXPATHLEN)
 			return -1;
 		if (!file_exists(path))
@@ -2547,6 +2561,9 @@ static int clone_update_rootfs(struct clone_update_data *data)
 		if (fclose(fout) < 0)
 			return -1;
 	}
+	else
+		bdev_put(bdev);
+
 	return 0;
 }
 
@@ -2592,6 +2609,7 @@ static struct lxc_container *lxcapi_clone(struct lxc_container *c, const char *n
 	char newpath[MAXPATHLEN];
 	int ret, storage_copied = 0;
 	const char *n, *l;
+	char *origroot = NULL;
 	struct clone_update_data data;
 	FILE *fout;
 	pid_t pid;
@@ -2627,6 +2645,10 @@ static struct lxc_container *lxcapi_clone(struct lxc_container *c, const char *n
 	}
 
 	// copy the configuration, tweak it as needed,
+	if (c->lxc_conf->rootfs.path) {
+		origroot = c->lxc_conf->rootfs.path;
+		c->lxc_conf->rootfs.path = NULL;
+	}
 	fout = fopen(newpath, "w");
 	if (!fout) {
 		SYSERROR("open %s", newpath);
@@ -2634,6 +2656,7 @@ static struct lxc_container *lxcapi_clone(struct lxc_container *c, const char *n
 	}
 	write_config(fout, c->lxc_conf);
 	fclose(fout);
+	c->lxc_conf->rootfs.path = origroot;
 
 	sprintf(newpath, "%s/%s/rootfs", l, n);
 	if (mkdir(newpath, 0755) < 0) {
@@ -2653,6 +2676,11 @@ static struct lxc_container *lxcapi_clone(struct lxc_container *c, const char *n
 		ERROR("clone: failed to create new container (%s %s)", n, l);
 		goto out;
 	}
+
+	// copy/snapshot rootfs's
+	ret = copy_storage(c, c2, bdevtype, flags, bdevdata, newsize);
+	if (ret < 0)
+		goto out;
 
 	// update utsname
 	if (!set_config_item_locked(c2, "lxc.utsname", newname)) {
@@ -2675,11 +2703,6 @@ static struct lxc_container *lxcapi_clone(struct lxc_container *c, const char *n
 	// update macaddrs
 	if (!(flags & LXC_CLONE_KEEPMACADDR))
 		network_new_hwaddrs(c2);
-
-	// copy/snapshot rootfs's
-	ret = copy_storage(c, c2, bdevtype, flags, bdevdata, newsize);
-	if (ret < 0)
-		goto out;
 
 	// We've now successfully created c2's storage, so clear it out if we
 	// fail after this
@@ -2731,7 +2754,7 @@ static bool lxcapi_rename(struct lxc_container *c, const char *newname)
 	struct bdev *bdev;
 	struct lxc_container *newc;
 
-	if (!c || !c->name || !c->config_path)
+	if (!c || !c->name || !c->config_path || !c->lxc_conf)
 		return false;
 
 	bdev = bdev_init(c->lxc_conf->rootfs.path, c->lxc_conf->rootfs.mount, NULL);
@@ -2830,7 +2853,7 @@ static int lxcapi_snapshot(struct lxc_container *c, const char *commentfile)
 	if (bdev_is_dir(c->lxc_conf->rootfs.path)) {
 		ERROR("Snapshot of directory-backed container requested.");
 		ERROR("Making a copy-clone.  If you do want snapshots, then");
-		ERROR("please create an overlayfs clone first, snapshot that");
+		ERROR("please create an aufs or overlayfs clone first, snapshot that");
 		ERROR("and keep the original container pristine.");
 		flags &= ~LXC_CLONE_SNAPSHOT | LXC_CLONE_MAYBE_SNAPSHOT;
 	}
@@ -3021,7 +3044,7 @@ out_free:
 static bool lxcapi_snapshot_restore(struct lxc_container *c, const char *snapname, const char *newname)
 {
 	char clonelxcpath[MAXPATHLEN];
-	int ret;
+	int flags = 0,ret;
 	struct lxc_container *snap, *rest;
 	struct bdev *bdev;
 	bool b = false;
@@ -3059,7 +3082,10 @@ static bool lxcapi_snapshot_restore(struct lxc_container *c, const char *snapnam
 		return false;
 	}
 
-	rest = lxcapi_clone(snap, newname, c->config_path, 0, bdev->type, NULL, 0, NULL);
+	if (strcmp(bdev->type, "dir") != 0 && strcmp(bdev->type, "loop") != 0)
+		flags = LXC_CLONE_SNAPSHOT | LXC_CLONE_MAYBE_SNAPSHOT;
+	rest = lxcapi_clone(snap, newname, c->config_path, flags,
+			bdev->type, NULL, 0, NULL);
 	bdev_put(bdev);
 	if (rest && lxcapi_is_defined(rest))
 		b = true;
@@ -3131,9 +3157,9 @@ static bool do_add_remove_node(pid_t init_pid, const char *path, bool add,
 	if (ret < 0 || ret >= MAXPATHLEN)
 		return false;
 
-	if (chdir(chrootpath) < 0)
+	if (chroot(chrootpath) < 0)
 		exit(1);
-	if (chroot(".") < 0)
+	if (chdir("/") < 0)
 		exit(1);
 	/* remove path if it exists */
 	if(faccessat(AT_FDCWD, path, F_OK, AT_SYMLINK_NOFOLLOW) == 0) {
@@ -3271,7 +3297,7 @@ struct lxc_container *lxc_container_new(const char *name, const char *configpath
 		c->config_path = strdup(lxc_global_config_value("lxc.lxcpath"));
 
 	if (!c->config_path) {
-		fprintf(stderr, "Out of memory");
+		fprintf(stderr, "Out of memory\n");
 		goto err;
 	}
 

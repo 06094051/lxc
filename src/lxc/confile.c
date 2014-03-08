@@ -44,6 +44,7 @@
 #include "log.h"
 #include "conf.h"
 #include "network.h"
+#include "lxcseccomp.h"
 
 #if HAVE_SYS_PERSONALITY_H
 #include <sys/personality.h>
@@ -1299,13 +1300,10 @@ static int config_idmap(const char *key, const char *value, struct lxc_conf *lxc
 		goto out;
 	memset(idmap, 0, sizeof(*idmap));
 
-	idmaplist->elem = idmap;
-
-	lxc_list_add_tail(&lxc_conf->id_map, idmaplist);
-
 	ret = sscanf(value, "%c %lu %lu %lu", &type, &nsid, &hostid, &range);
 	if (ret != 4)
 		goto out;
+
 	INFO("read uid map: type %c nsid %lu hostid %lu range %lu", type, nsid, hostid, range);
 	if (type == 'u')
 		idmap->idtype = ID_TYPE_UID;
@@ -1313,9 +1311,13 @@ static int config_idmap(const char *key, const char *value, struct lxc_conf *lxc
 		idmap->idtype = ID_TYPE_GID;
 	else
 		goto out;
+
 	idmap->hostid = hostid;
 	idmap->nsid = nsid;
 	idmap->range = range;
+
+	idmaplist->elem = idmap;
+	lxc_list_add_tail(&lxc_conf->id_map, idmaplist);
 
 	return 0;
 
@@ -2124,6 +2126,8 @@ int lxc_get_config_item(struct lxc_conf *c, const char *key, char *retv,
 		return lxc_get_conf_int(c, retv, inlen, c->start_order);
 	else if (strcmp(key, "lxc.group") == 0)
 		return lxc_get_item_groups(c, retv, inlen);
+	else if (strcmp(key, "lxc.seccomp") == 0)
+		v = c->seccomp;
 	else return -1;
 
 	if (!v)
@@ -2151,6 +2155,10 @@ int lxc_clear_config_item(struct lxc_conf *c, const char *key)
 		return lxc_clear_hooks(c, key);
 	else if (strncmp(key, "lxc.group", 9) == 0)
 		return lxc_clear_groups(c);
+	else if (strncmp(key, "lxc.seccomp", 11) == 0) {
+		lxc_seccomp_free(c);
+		return 0;
+	}
 
 	return -1;
 }
@@ -2274,11 +2282,19 @@ void write_config(FILE *fout, struct lxc_conf *c)
 			struct lxc_inetdev *i = it2->elem;
 			char buf[INET_ADDRSTRLEN];
 			inet_ntop(AF_INET, &i->addr, buf, sizeof(buf));
+			fprintf(fout, "lxc.network.ipv4 = %s", buf);
+
 			if (i->prefix)
-				fprintf(fout, "lxc.network.ipv4 = %s/%d\n",
-					buf, i->prefix);
+				fprintf(fout, "/%d", i->prefix);
+
+			if (i->bcast.s_addr != (i->addr.s_addr |
+			    htonl(INADDR_BROADCAST >>  i->prefix))) {
+
+				inet_ntop(AF_INET, &i->bcast, buf, sizeof(buf));
+				fprintf(fout, " %s\n", buf);
+			}
 			else
-				fprintf(fout, "lxc.network.ipv4 = %s\n", buf);
+				fprintf(fout, "\n");
 		}
 		if (n->ipv6_gateway_auto)
 			fprintf(fout, "lxc.network.ipv6.gateway = auto\n");

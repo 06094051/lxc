@@ -302,6 +302,13 @@ static int detect_fs(struct bdev *bdev, char *type, int len)
 	if (unshare(CLONE_NEWNS) < 0)
 		exit(1);
 
+	if (detect_shared_rootfs()) {
+		if (mount(NULL, "/", NULL, MS_SLAVE|MS_REC, NULL)) {
+			SYSERROR("Failed to make / rslave");
+			ERROR("Continuing...");
+		}
+	}
+
 	ret = mount_unknown_fs(srcdev, bdev->dest, bdev->mntopts);
 	if (ret < 0) {
 		ERROR("failed mounting %s onto %s to detect fstype", srcdev, bdev->dest);
@@ -442,12 +449,12 @@ static char *dir_new_path(char *src, const char *oldname, const char *name,
  */
 static int dir_clonepaths(struct bdev *orig, struct bdev *new, const char *oldname,
 		const char *cname, const char *oldpath, const char *lxcpath, int snap,
-		uint64_t newsize)
+		uint64_t newsize, struct lxc_conf *conf)
 {
 	int len, ret;
 
 	if (snap) {
-		ERROR("directories cannot be snapshotted.  Try overlayfs.");
+		ERROR("directories cannot be snapshotted.  Try aufs or overlayfs.");
 		return -1;
 	}
 
@@ -477,7 +484,10 @@ static int dir_destroy(struct bdev *orig)
 static int dir_create(struct bdev *bdev, const char *dest, const char *n,
 			struct bdev_specs *specs)
 {
-	bdev->src = strdup(dest);
+	if (specs && specs->dir)
+		bdev->src = strdup(specs->dir);
+	else
+		bdev->src = strdup(dest);
 	bdev->dest = strdup(dest);
 	if (!bdev->src || !bdev->dest) {
 		ERROR("Out of memory");
@@ -667,7 +677,7 @@ static int zfs_clone(const char *opath, const char *npath, const char *oname,
 
 static int zfs_clonepaths(struct bdev *orig, struct bdev *new, const char *oldname,
 		const char *cname, const char *oldpath, const char *lxcpath, int snap,
-		uint64_t newsize)
+		uint64_t newsize, struct lxc_conf *conf)
 {
 	int len, ret;
 
@@ -1001,7 +1011,7 @@ static int is_blktype(struct bdev *b)
 
 static int lvm_clonepaths(struct bdev *orig, struct bdev *new, const char *oldname,
 		const char *cname, const char *oldpath, const char *lxcpath, int snap,
-		uint64_t newsize)
+		uint64_t newsize, struct lxc_conf *conf)
 {
 	char fstype[100];
 	uint64_t size = newsize;
@@ -1326,6 +1336,57 @@ static int btrfs_subvolume_create(const char *path)
 	return ret;
 }
 
+#define BTRFS_FSID_SIZE 16
+struct btrfs_ioctl_fs_info_args {
+	unsigned long long max_id;
+	unsigned long long num_devices;
+	char fsid[BTRFS_FSID_SIZE];
+	unsigned long long reserved[124];
+};
+
+#define BTRFS_IOC_FS_INFO _IOR(BTRFS_IOCTL_MAGIC, 31, \
+		struct btrfs_ioctl_fs_info_args)
+
+static int btrfs_same_fs(const char *orig, const char *new) {
+	int fd_orig = -1, fd_new = -1, ret = -1;
+	struct btrfs_ioctl_fs_info_args orig_args, new_args;
+
+	fd_orig = open(orig, O_RDONLY);
+	if (fd_orig < 0) {
+		SYSERROR("Error opening original rootfs %s", orig);
+		goto out;
+	}
+	ret = ioctl(fd_orig, BTRFS_IOC_FS_INFO, &orig_args);
+	if (ret < 0) {
+		SYSERROR("BTRFS_IOC_FS_INFO %s", orig);
+		goto out;
+	}
+
+	fd_new = open(new, O_RDONLY);
+	if (fd_new < 0) {
+		SYSERROR("Error opening new container dir %s", new);
+		ret = -1;
+		goto out;
+	}
+	ret = ioctl(fd_new, BTRFS_IOC_FS_INFO, &new_args);
+	if (ret < 0) {
+		SYSERROR("BTRFS_IOC_FS_INFO %s", new);
+		goto out;
+	}
+
+	if (strncmp(orig_args.fsid, new_args.fsid, BTRFS_FSID_SIZE) != 0) {
+		ret = -1;
+		goto out;
+	}
+	ret = 0;
+out:
+	if (fd_new != -1)
+		close(fd_new);
+	if (fd_orig != -1)
+		close(fd_orig);
+	return ret;
+}
+
 static int btrfs_snapshot(const char *orig, const char *new)
 {
 	int fd = -1, fddst = -1, ret = -1;
@@ -1374,7 +1435,7 @@ out:
 
 static int btrfs_clonepaths(struct bdev *orig, struct bdev *new, const char *oldname,
 		const char *cname, const char *oldpath, const char *lxcpath, int snap,
-		uint64_t newsize)
+		uint64_t newsize, struct lxc_conf *conf)
 {
 	if (!orig->dest || !orig->src)
 		return -1;
@@ -1626,7 +1687,7 @@ static int do_loop_create(const char *path, uint64_t size, const char *fstype)
  */
 static int loop_clonepaths(struct bdev *orig, struct bdev *new, const char *oldname,
 		const char *cname, const char *oldpath, const char *lxcpath, int snap,
-		uint64_t newsize)
+		uint64_t newsize, struct lxc_conf *conf)
 {
 	char fstype[100];
 	uint64_t size = newsize;
@@ -1826,9 +1887,40 @@ static int overlayfs_umount(struct bdev *bdev)
 	return umount(bdev->dest);
 }
 
+struct rsync_data_char {
+	char *src;
+	char *dest;
+};
+
+static int rsync_delta(struct rsync_data_char *data)
+{
+	if (setgid(0) < 0) {
+		ERROR("Failed to setgid to 0");
+		return -1;
+	}
+	if (setgroups(0, NULL) < 0)
+		WARN("Failed to clear groups");
+	if (setuid(0) < 0) {
+		ERROR("Failed to setuid to 0");
+		return -1;
+	}
+	if (do_rsync(data->src, data->dest) < 0) {
+		ERROR("rsyncing %s to %s", data->src, data->dest);
+		return -1;
+	}
+
+	return 0;
+}
+
+static int rsync_delta_wrapper(void *data)
+{
+	struct rsync_data_char *arg = data;
+	return rsync_delta(arg);
+}
+
 static int overlayfs_clonepaths(struct bdev *orig, struct bdev *new, const char *oldname,
 		const char *cname, const char *oldpath, const char *lxcpath, int snap,
-		uint64_t newsize)
+		uint64_t newsize, struct lxc_conf *conf)
 {
 	if (!snap) {
 		ERROR("overlayfs is only for snapshot clones");
@@ -1843,6 +1935,9 @@ static int overlayfs_clonepaths(struct bdev *orig, struct bdev *new, const char 
 		return -1;
 	if (mkdir_p(new->dest, 0755) < 0)
 		return -1;
+
+	if (am_unpriv() && chown_mapped_root(new->dest, conf) < 0)
+		WARN("Failed to update ownership of %s", new->dest);
 
 	if (strcmp(orig->type, "dir") == 0) {
 		char *delta;
@@ -1864,6 +1959,8 @@ static int overlayfs_clonepaths(struct bdev *orig, struct bdev *new, const char 
 			free(delta);
 			return -1;
 		}
+		if (am_unpriv() && chown_mapped_root(delta, conf) < 0)
+			WARN("Failed to update ownership of %s", delta);
 
 		// the src will be 'overlayfs:lowerdir:upperdir'
 		len = strlen(delta) + strlen(orig->src) + 12;
@@ -1897,7 +1994,22 @@ static int overlayfs_clonepaths(struct bdev *orig, struct bdev *new, const char 
 			free(osrc);
 			return -ENOMEM;
 		}
-		if (do_rsync(odelta, ndelta) < 0) {
+		if ((ret = mkdir(ndelta, 0755)) < 0) {
+			SYSERROR("error: mkdir %s", ndelta);
+			free(osrc);
+			free(ndelta);
+			return -1;
+		}
+		if (am_unpriv() && chown_mapped_root(ndelta, conf) < 0)
+			WARN("Failed to update ownership of %s", ndelta);
+		struct rsync_data_char rdata;
+		rdata.src = odelta;
+		rdata.dest = ndelta;
+		if (am_unpriv())
+			ret = userns_exec_1(conf, rsync_delta_wrapper, &rdata);
+		else
+			ret = rsync_delta(&rdata);
+		if (ret) {
 			free(osrc);
 			free(ndelta);
 			ERROR("copying overlayfs delta");
@@ -1997,11 +2109,290 @@ static const struct bdev_ops overlayfs_ops = {
 	.can_snapshot = true,
 };
 
+//
+// aufs ops
+//
+
+static int aufs_detect(const char *path)
+{
+	if (strncmp(path, "aufs:", 5) == 0)
+		return 1; // take their word for it
+	return 0;
+}
+
+//
+// XXXXXXX plain directory bind mount ops
+//
+static int aufs_mount(struct bdev *bdev)
+{
+	char *options, *dup, *lower, *upper, *rundir;
+	int len;
+	unsigned long mntflags;
+	char *mntdata;
+	char *runpath;
+	int ret;
+
+	if (strcmp(bdev->type, "aufs"))
+		return -22;
+	if (!bdev->src || !bdev->dest)
+		return -22;
+
+	//  separately mount it first
+	//  mount -t aufs -obr=${upper}=rw:${lower}=ro lower dest
+	dup = alloca(strlen(bdev->src)+1);
+	strcpy(dup, bdev->src);
+	if (!(lower = index(dup, ':')))
+		return -22;
+	if (!(upper = index(++lower, ':')))
+		return -22;
+	*upper = '\0';
+	upper++;
+
+	if (parse_mntopts(bdev->mntopts, &mntflags, &mntdata) < 0) {
+		free(mntdata);
+		return -22;
+	}
+
+	// TODO We should check whether bdev->src is a blockdev, and if so
+	// but for now, only support aufs of a basic directory
+
+	rundir = get_rundir();
+	if (!rundir)
+		return -1;
+
+	len = strlen(rundir) + strlen("/lxc") + 1;
+	runpath = alloca(len);
+	ret = snprintf(runpath, len, "%s/lxc", rundir);
+	if (ret < 0 || ret >= len) {
+		free(mntdata);
+		free(rundir);
+		return -1;
+	}
+	if (mkdir_p(runpath, 0755) < 0) {
+		free(mntdata);
+		free(rundir);
+		return -1;
+	}
+
+	// AUFS does not work on top of certain filesystems like (XFS or Btrfs)
+	// so add xino=RUNDIR/lxc/aufs.xino parameter to mount options
+	//
+	// see http://www.mail-archive.com/aufs-users@lists.sourceforge.net/msg02587.html
+	if (mntdata) {
+		len = strlen(lower) + strlen(upper) + strlen(runpath) + strlen("br==rw:=ro,,xino=/aufs.xino") + strlen(mntdata) + 1;
+		options = alloca(len);
+		ret = snprintf(options, len, "br=%s=rw:%s=ro,%s,xino=%s/aufs.xino", upper, lower, mntdata, runpath);
+	}
+	else {
+		len = strlen(lower) + strlen(upper) + strlen(runpath) + strlen("br==rw:=ro,xino=/aufs.xino") + 1;
+		options = alloca(len);
+		ret = snprintf(options, len, "br=%s=rw:%s=ro,xino=%s/aufs.xino", upper, lower, runpath);
+	}
+
+	free(rundir);
+
+	if (ret < 0 || ret >= len) {
+		free(mntdata);
+		return -1;
+	}
+
+	ret = mount(lower, bdev->dest, "aufs", MS_MGC_VAL | mntflags, options);
+	if (ret < 0)
+		SYSERROR("aufs: error mounting %s onto %s options %s",
+			lower, bdev->dest, options);
+	else
+		INFO("aufs: mounted %s onto %s options %s",
+			lower, bdev->dest, options);
+	return ret;
+}
+
+static int aufs_umount(struct bdev *bdev)
+{
+	if (strcmp(bdev->type, "aufs"))
+		return -22;
+	if (!bdev->src || !bdev->dest)
+		return -22;
+	return umount(bdev->dest);
+}
+
+static int aufs_clonepaths(struct bdev *orig, struct bdev *new, const char *oldname,
+		const char *cname, const char *oldpath, const char *lxcpath, int snap,
+		uint64_t newsize, struct lxc_conf *conf)
+{
+	if (!snap) {
+		ERROR("aufs is only for snapshot clones");
+		return -22;
+	}
+
+	if (!orig->src || !orig->dest)
+		return -1;
+
+	new->dest = dir_new_path(orig->dest, oldname, cname, oldpath, lxcpath);
+	if (!new->dest)
+		return -1;
+	if (mkdir_p(new->dest, 0755) < 0)
+		return -1;
+
+	if (strcmp(orig->type, "dir") == 0) {
+		char *delta;
+		int ret, len;
+
+		// if we have /var/lib/lxc/c2/rootfs, then delta will be
+		//            /var/lib/lxc/c2/delta0
+		delta = strdup(new->dest);
+		if (!delta) {
+			return -1;
+		}
+		if (strlen(delta) < 6) {
+			free(delta);
+			return -22;
+		}
+		strcpy(&delta[strlen(delta)-6], "delta0");
+		if ((ret = mkdir(delta, 0755)) < 0) {
+			SYSERROR("error: mkdir %s", delta);
+			free(delta);
+			return -1;
+		}
+
+		// the src will be 'aufs:lowerdir:upperdir'
+		len = strlen(delta) + strlen(orig->src) + 12;
+		new->src = malloc(len);
+		if (!new->src) {
+			free(delta);
+			return -ENOMEM;
+		}
+		ret = snprintf(new->src, len, "aufs:%s:%s", orig->src, delta);
+		free(delta);
+		if (ret < 0 || ret >= len)
+			return -ENOMEM;
+	} else if (strcmp(orig->type, "aufs") == 0) {
+		// What exactly do we want to do here?
+		// I think we want to use the original lowerdir, with a
+		// private delta which is originally rsynced from the
+		// original delta
+		char *osrc, *odelta, *nsrc, *ndelta;
+		int len, ret;
+		if (!(osrc = strdup(orig->src)))
+			return -22;
+		nsrc = index(osrc, ':') + 1;
+		if (nsrc != osrc + 5 || (odelta = index(nsrc, ':')) == NULL) {
+			free(osrc);
+			return -22;
+		}
+		*odelta = '\0';
+		odelta++;
+		ndelta = dir_new_path(odelta, oldname, cname, oldpath, lxcpath);
+		if (!ndelta) {
+			free(osrc);
+			return -ENOMEM;
+		}
+		if (do_rsync(odelta, ndelta) < 0) {
+			free(osrc);
+			free(ndelta);
+			ERROR("copying aufs delta");
+			return -1;
+		}
+		len = strlen(nsrc) + strlen(ndelta) + 12;
+		new->src = malloc(len);
+		if (!new->src) {
+			free(osrc);
+			free(ndelta);
+			return -ENOMEM;
+		}
+		ret = snprintf(new->src, len, "aufs:%s:%s", nsrc, ndelta);
+		free(osrc);
+		free(ndelta);
+		if (ret < 0 || ret >= len)
+			return -ENOMEM;
+	} else {
+		ERROR("aufs clone of %s container is not yet supported",
+			orig->type);
+		// Note, supporting this will require aufs_mount supporting
+		// mounting of the underlay.  No big deal, just needs to be done.
+		return -1;
+	}
+
+	return 0;
+}
+
+static int aufs_destroy(struct bdev *orig)
+{
+	char *upper;
+
+	if (strncmp(orig->src, "aufs:", 5) != 0)
+		return -22;
+	upper = index(orig->src + 5, ':');
+	if (!upper)
+		return -22;
+	upper++;
+	return lxc_rmdir_onedev(upper);
+}
+
+/*
+ * to say 'lxc-create -t ubuntu -n o1 -B aufs' means you want
+ * $lxcpath/$lxcname/rootfs to have the created container, while all
+ * changes after starting the container are written to
+ * $lxcpath/$lxcname/delta0
+ */
+static int aufs_create(struct bdev *bdev, const char *dest, const char *n,
+			struct bdev_specs *specs)
+{
+	char *delta;
+	int ret, len = strlen(dest), newlen;
+
+	if (len < 8 || strcmp(dest+len-7, "/rootfs") != 0)
+		return -1;
+
+	if (!(bdev->dest = strdup(dest))) {
+		ERROR("Out of memory");
+		return -1;
+	}
+
+	delta = alloca(strlen(dest)+1);
+	strcpy(delta, dest);
+	strcpy(delta+len-6, "delta0");
+
+	if (mkdir_p(delta, 0755) < 0) {
+		ERROR("Error creating %s", delta);
+		return -1;
+	}
+
+	/* aufs:lower:upper */
+	newlen = (2 * len) + strlen("aufs:") + 2;
+	bdev->src = malloc(newlen);
+	if (!bdev->src) {
+		ERROR("Out of memory");
+		return -1;
+	}
+	ret = snprintf(bdev->src, newlen, "aufs:%s:%s", dest, delta);
+	if (ret < 0 || ret >= newlen)
+		return -1;
+
+	if (mkdir_p(bdev->dest, 0755) < 0) {
+		ERROR("Error creating %s", bdev->dest);
+		return -1;
+	}
+
+	return 0;
+}
+
+static const struct bdev_ops aufs_ops = {
+	.detect = &aufs_detect,
+	.mount = &aufs_mount,
+	.umount = &aufs_umount,
+	.clone_paths = &aufs_clonepaths,
+	.destroy = &aufs_destroy,
+	.create = &aufs_create,
+	.can_snapshot = true,
+};
+
+
 static const struct bdev_type bdevs[] = {
 	{.name = "zfs", .ops = &zfs_ops,},
 	{.name = "lvm", .ops = &lvm_ops,},
 	{.name = "btrfs", .ops = &btrfs_ops,},
 	{.name = "dir", .ops = &dir_ops,},
+	{.name = "aufs", .ops = &aufs_ops,},
 	{.name = "overlayfs", .ops = &overlayfs_ops,},
 	{.name = "loop", .ops = &loop_ops,},
 };
@@ -2083,6 +2474,12 @@ static int rsync_rootfs(struct rsync_data *data)
 		SYSERROR("unshare CLONE_NEWNS");
 		return -1;
 	}
+	if (detect_shared_rootfs()) {
+		if (mount(NULL, "/", NULL, MS_SLAVE|MS_REC, NULL)) {
+			SYSERROR("Failed to make / rslave");
+			ERROR("Continuing...");
+		}
+	}
 
 	// If not a snapshot, copy the fs.
 	if (orig->ops->mount(orig) < 0) {
@@ -2127,6 +2524,31 @@ bool bdev_is_dir(const char *path)
 		ret = true;
 	bdev_put(orig);
 	return ret;
+}
+
+/*
+ * is an unprivileged user allowed to make this kind of snapshot
+ */
+static bool unpriv_snap_allowed(struct bdev *b, const char *t, bool snap,
+		bool maybesnap)
+{
+	if (!t) {
+		// new type will be same as original
+		// (unless snap && b->type == dir, in which case it will be
+		// overlayfs -- which is also allowed)
+		if (strcmp(b->type, "dir") == 0 ||
+				strcmp(b->type, "overlayfs") == 0 ||
+				strcmp(b->type, "loop") == 0)
+			return true;
+		return false;
+	}
+
+	// unprivileged users can copy and snapshot dir, overlayfs,
+	// and loop.  In particular, not zfs, btrfs, or lvm.
+	if (strcmp(t, "dir") == 0 || strcmp(t, "overlayfs") == 0 ||
+			strcmp(t, "loop") == 0)
+		return true;
+	return false;
 }
 
 /*
@@ -2180,26 +2602,6 @@ struct bdev *bdev_copy(struct lxc_container *c0, const char *cname,
 		}
 	}
 
-	/* check for privilege */
-	if (am_unpriv()) {
-		if (snap && !maybe_snap) {
-			ERROR("Unprivileged users cannot snapshot");
-			bdev_put(orig);
-			return NULL;
-		}
-		if (bdevtype && strcmp(bdevtype, "dir") != 0) {
-			ERROR("Unprivileged users can only make dir copy-clones");
-			bdev_put(orig);
-			return NULL;
-		}
-		if (strcmp(orig->type, "dir") != 0) {
-			ERROR("Unprivileged users can only make dir copy-clones");
-			bdev_put(orig);
-			return NULL;
-		}
-	}
-
-
 	/*
 	 * special case for snapshot - if caller requested maybe_snapshot and
 	 * keepbdevtype and backing store is directory, then proceed with a copy
@@ -2214,9 +2616,16 @@ struct bdev *bdev_copy(struct lxc_container *c0, const char *cname,
 	if (!bdevtype && !keepbdevtype && snap && strcmp(orig->type , "dir") == 0)
 		bdevtype = "overlayfs";
 
+	if (am_unpriv() && !unpriv_snap_allowed(orig, bdevtype, snap, maybe_snap)) {
+		ERROR("Unsupported snapshot type for unprivileged users");
+		bdev_put(orig);
+		return NULL;
+	}
+
 	*needs_rdep = 0;
 	if (bdevtype && strcmp(orig->type, "dir") == 0 &&
-			strcmp(bdevtype, "overlayfs") == 0)
+			(strcmp(bdevtype, "aufs") == 0 ||
+			 strcmp(bdevtype, "overlayfs") == 0))
 		*needs_rdep = 1;
 
 	new = bdev_get(bdevtype ? bdevtype : orig->type);
@@ -2226,21 +2635,45 @@ struct bdev *bdev_copy(struct lxc_container *c0, const char *cname,
 		return NULL;
 	}
 
-	if (new->ops->clone_paths(orig, new, oldname, cname, oldpath, lxcpath, snap, newsize) < 0) {
+	if (new->ops->clone_paths(orig, new, oldname, cname, oldpath, lxcpath,
+				snap, newsize, c0->lxc_conf) < 0) {
 		ERROR("failed getting pathnames for cloned storage: %s", src);
-		bdev_put(orig);
-		bdev_put(new);
-		return NULL;
+		goto err;
 	}
+
+	if (am_unpriv() && chown_mapped_root(new->src, c0->lxc_conf) < 0)
+		WARN("Failed to update ownership of %s", new->dest);
+
 	if (snap)
 		return new;
+
+	/*
+	 * https://github.com/lxc/lxc/issues/131
+	 * Use btrfs snapshot feature instead of rsync to restore if both orig and new are btrfs
+	 */
+	if (bdevtype &&
+			strcmp(orig->type, "btrfs") == 0 && strcmp(new->type, "btrfs") == 0 &&
+			btrfs_same_fs(orig->dest, new->dest) == 0) {
+		if (btrfs_destroy(new) < 0) {
+			ERROR("Error destroying %s subvolume", new->dest);
+			goto err;
+		}
+		if (mkdir_p(new->dest, 0755) < 0) {
+			ERROR("Error creating %s directory", new->dest);
+			goto err;
+		}
+		if (btrfs_snapshot(orig->dest, new->dest) < 0) {
+			ERROR("Error restoring %s to %s", orig->dest, new->dest);
+			goto err;
+		}
+		bdev_put(orig);
+		return new;
+	}
 
 	pid = fork();
 	if (pid < 0) {
 		SYSERROR("fork");
-		bdev_put(orig);
-		bdev_put(new);
-		return NULL;
+		goto err;
 	}
 
 	if (pid > 0) {
@@ -2261,6 +2694,11 @@ struct bdev *bdev_copy(struct lxc_container *c0, const char *cname,
 		ret = rsync_rootfs(&data);
 
 	exit(ret == 0 ? 0 : 1);
+
+err:
+	bdev_put(orig);
+	bdev_put(new);
+	return NULL;
 }
 
 static struct bdev * do_bdev_create(const char *dest, const char *type,
@@ -2324,7 +2762,7 @@ struct bdev *bdev_create(const char *dest, const char *type,
 	return do_bdev_create(dest, type, cname, specs);
 }
 
-char *overlayfs_getlower(char *p)
+char *overlay_getlower(char *p)
 {
 	char *p1 = index(p, ':');
 	if (p1)

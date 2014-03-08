@@ -76,7 +76,7 @@ static void lock_mutex(pthread_mutex_t *l)
 	int ret;
 
 	if ((ret = pthread_mutex_lock(l)) != 0) {
-		fprintf(stderr, "pthread_mutex_lock returned:%d %s", ret, strerror(ret));
+		fprintf(stderr, "pthread_mutex_lock returned:%d %s\n", ret, strerror(ret));
 		dump_stacktrace();
 		exit(1);
 	}
@@ -87,7 +87,7 @@ static void unlock_mutex(pthread_mutex_t *l)
 	int ret;
 
 	if ((ret = pthread_mutex_unlock(l)) != 0) {
-		fprintf(stderr, "pthread_mutex_unlock returned:%d %s", ret, strerror(ret));
+		fprintf(stderr, "pthread_mutex_unlock returned:%d %s\n", ret, strerror(ret));
 		dump_stacktrace();
 		exit(1);
 	}
@@ -98,7 +98,7 @@ static char *lxclock_name(const char *p, const char *n)
 	int ret;
 	int len;
 	char *dest;
-	const char *rundir;
+	char *rundir;
 
 	/* lockfile will be:
 	 * "/run" + "/lock/lxc/$lxcpath/$lxcname + '\0' if root
@@ -109,14 +109,19 @@ static char *lxclock_name(const char *p, const char *n)
 	/* length of "/lock/lxc/" + $lxcpath + "/" + $lxcname + '\0' */
 	len = strlen("/lock/lxc/") + strlen(n) + strlen(p) + 2;
 	rundir = get_rundir();
+	if (!rundir)
+		return NULL;
 	len += strlen(rundir);
 
-	if ((dest = malloc(len)) == NULL)
+	if ((dest = malloc(len)) == NULL) {
+		free(rundir);
 		return NULL;
+	}
 
 	ret = snprintf(dest, len, "%s/lock/lxc/%s", rundir, p);
 	if (ret < 0 || ret >= len) {
 		free(dest);
+		free(rundir);
 		return NULL;
 	}
 	ret = mkdir_p(dest, 0755);
@@ -128,6 +133,7 @@ static char *lxclock_name(const char *p, const char *n)
 			d = realloc(dest, l2);
 			if (!d) {
 				free(dest);
+				free(rundir);
 				return NULL;
 			}
 			len = l2;
@@ -136,11 +142,14 @@ static char *lxclock_name(const char *p, const char *n)
 		ret = snprintf(dest, len, "/tmp/%d/lxc/%s", geteuid(), p);
 		if (ret < 0 || ret >= len) {
 			free(dest);
+			free(rundir);
 			return NULL;
 		}
 		ret = snprintf(dest, len, "/tmp/%d/lxc/%s/%s", geteuid(), p, n);
 	} else
 		ret = snprintf(dest, len, "%s/lock/lxc/%s/%s", rundir, p, n);
+
+	free(rundir);
 
 	if (ret < 0 || ret >= len) {
 		free(dest);

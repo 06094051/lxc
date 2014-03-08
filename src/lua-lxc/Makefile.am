@@ -1,7 +1,9 @@
 if ENABLE_LUA
 
-luadir=$(LUA_INSTALL_LMOD)
-sodir=$(LUA_INSTALL_CMOD)/lxc
+luasharedir=$(LUA_SHAREDIR)
+lualibdir=$(LUA_LIBDIR)
+luadir=$(luasharedir)
+sodir=$(lualibdir)/lxc
 
 lua_DATA=lxc.lua
 
@@ -18,7 +20,7 @@ core_so_LDFLAGS = \
 	-L$(top_srcdir)/src/lxc \
 	-Wl,-soname,core.so.$(firstword $(subst ., ,$(VERSION)))
 
-core_so_LDADD = -llxc $(LUA_LIBS)
+core_so_LDADD = -llxc
 
 lxc.lua:
 

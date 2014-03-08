@@ -301,7 +301,7 @@ struct lxc_conf {
 
 	char *lsm_aa_profile;
 	char *lsm_se_context;
-	int lsm_umount_proc;
+	int tmp_umount_proc;
 	char *seccomp;  // filename with the seccomp rules
 #if HAVE_SCMP_FILTER_CTX
 	scmp_filter_ctx *seccomp_ctx;
@@ -369,7 +369,7 @@ extern int lxc_clear_groups(struct lxc_conf *c);
 struct cgroup_process_info;
 extern int lxc_setup(struct lxc_handler *handler);
 
-extern void lxc_rename_phys_nics_on_shutdown(struct lxc_conf *conf);
+extern void lxc_rename_phys_nics_on_shutdown(int netnsfd, struct lxc_conf *conf);
 
 extern int find_unmapped_nsuid(struct lxc_conf *conf, enum idtype idtype);
 extern int mapped_hostid(unsigned id, struct lxc_conf *conf, enum idtype idtype);
@@ -378,4 +378,5 @@ extern int ttys_shift_ids(struct lxc_conf *c);
 extern int userns_exec_1(struct lxc_conf *conf, int (*fn)(void *), void *data);
 extern int parse_mntopts(const char *mntopts, unsigned long *mntflags,
 			 char **mntdata);
+extern void tmp_proc_unmount(struct lxc_conf *lxc_conf);
 #endif

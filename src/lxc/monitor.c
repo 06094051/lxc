@@ -54,26 +54,33 @@ int lxc_monitor_fifo_name(const char *lxcpath, char *fifo_path, size_t fifo_path
 			  int do_mkdirp)
 {
 	int ret;
-	const char *rundir;
+	char *rundir;
 
 	rundir = get_rundir();
+	if (!rundir)
+		return -1;
+
 	if (do_mkdirp) {
 		ret = snprintf(fifo_path, fifo_path_sz, "%s/lxc/%s", rundir, lxcpath);
 		if (ret < 0 || ret >= fifo_path_sz) {
 			ERROR("rundir/lxcpath (%s/%s) too long for monitor fifo", rundir, lxcpath);
+			free(rundir);
 			return -1;
 		}
 		ret = mkdir_p(fifo_path, 0755);
 		if (ret < 0) {
 			ERROR("unable to create monitor fifo dir %s", fifo_path);
+			free(rundir);
 			return ret;
 		}
 	}
 	ret = snprintf(fifo_path, fifo_path_sz, "%s/lxc/%s/monitor-fifo", rundir, lxcpath);
 	if (ret < 0 || ret >= fifo_path_sz) {
 		ERROR("rundir/lxcpath (%s/%s) too long for monitor fifo", rundir, lxcpath);
+		free(rundir);
 		return -1;
 	}
+	free(rundir);
 	return 0;
 }
 
@@ -121,31 +128,6 @@ void lxc_monitor_send_state(const char *name, lxc_state_t state, const char *lxc
 int lxc_monitor_close(int fd)
 {
 	return close(fd);
-}
-
-/* Note we don't use SHA-1 here as we don't want to depend on HAVE_GNUTLS.
- * FNV has good anti collision properties and we're not worried
- * about pre-image resistance or one-way-ness, we're just trying to make
- * the name unique in the 108 bytes of space we have.
- */
-#define FNV1A_64_INIT ((uint64_t)0xcbf29ce484222325ULL)
-static uint64_t fnv_64a_buf(void *buf, size_t len, uint64_t hval)
-{
-	unsigned char *bp;
-
-	for(bp = buf; bp < (unsigned char *)buf + len; bp++)
-	{
-		/* xor the bottom with the current octet */
-		hval ^= (uint64_t)*bp;
-
-		/* gcc optimised:
-		 * multiply by the 64 bit FNV magic prime mod 2^64
-		 */
-		hval += (hval << 1) + (hval << 4) + (hval << 5) +
-			(hval << 7) + (hval << 8) + (hval << 40);
-	}
-
-	return hval;
 }
 
 int lxc_monitor_sock_name(const char *lxcpath, struct sockaddr_un *addr) {

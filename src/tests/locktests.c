@@ -17,6 +17,7 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 #include "lxc/lxclock.h"
+#include "config.h"
 #include <unistd.h>
 #include <signal.h>
 #include <stdio.h>
@@ -65,7 +66,7 @@ static void test_two_locks(void)
 		fprintf(stderr, "%d; failed to get lock\n", __LINE__);
 		exit(1);
 	}
-	if (write(p[1], &c, 1) < 0) {
+	if (write(p[1], "a", 1) < 0) {
 		perror("write");
 		exit(1);
 	}
@@ -121,10 +122,7 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 	struct stat sb;
-	// we don't create the file until the container is running, so this
-	// bit of the test needs to be changed
-	//char *pathname = "/run/lock/lxc/var/lib/lxc/" mycontainername;
-	char *pathname = "/run/lock/lxc/var/lib/lxc/";
+	char *pathname = RUNTIME_PATH "/lock/lxc/var/lib/lxc/";
 	ret = stat(pathname, &sb);
 	if (ret != 0) {
 		fprintf(stderr, "%d: filename %s not created\n", __LINE__,

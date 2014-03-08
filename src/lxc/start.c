@@ -83,6 +83,29 @@ const struct ns_info ns_info[LXC_NS_MAX] = {
 	[LXC_NS_NET] = {"net", CLONE_NEWNET}
 };
 
+static void print_top_failing_dir(const char *path)
+{
+	size_t len = strlen(path);
+	char *copy = alloca(len+1), *p, *e, saved;
+	strcpy(copy, path);
+
+	p = copy;
+	e = copy + len;
+	while (p < e) {
+		while (p < e && *p == '/') p++;
+		while (p < e && *p != '/') p++;
+		saved = *p;
+		*p = '\0';
+		if (access(copy, X_OK)) {
+			SYSERROR("could not access %s.  Please grant it 'x' " \
+			      "access, or add an ACL for the container root.",
+			      copy);
+			return;
+		}
+		*p = saved;
+	}
+}
+
 static void close_ns(int ns_fd[LXC_NS_MAX]) {
 	int i;
 
@@ -538,6 +561,52 @@ static int must_drop_cap_sys_boot(struct lxc_conf *conf)
 	return 0;
 }
 
+/*
+ * netpipe is used in the unprivileged case to transfer the ifindexes
+ * from parent to child
+ */
+static int netpipe = -1;
+
+static inline int count_veths(struct lxc_list *network)
+{
+	struct lxc_list *iterator;
+	struct lxc_netdev *netdev;
+	int count = 0;
+
+	lxc_list_for_each(iterator, network) {
+		netdev = iterator->elem;
+		if (netdev->type != LXC_NET_VETH)
+			continue;
+		count++;
+	}
+	return count;
+}
+
+static int read_unpriv_netifindex(struct lxc_list *network)
+{
+	struct lxc_list *iterator;
+	struct lxc_netdev *netdev;
+
+	if (netpipe == -1)
+		return 0;
+	lxc_list_for_each(iterator, network) {
+		netdev = iterator->elem;
+		if (netdev->type != LXC_NET_VETH)
+			continue;
+		if (!(netdev->name = malloc(IFNAMSIZ))) {
+			ERROR("Out of memory");
+			close(netpipe);
+			return -1;
+		}
+		if (read(netpipe, netdev->name, IFNAMSIZ) != IFNAMSIZ) {
+			close(netpipe);
+			return -1;
+		}
+	}
+	close(netpipe);
+	return 0;
+}
+
 static int do_start(void *data)
 {
 	struct lxc_handler *handler = data;
@@ -572,6 +641,9 @@ static int do_start(void *data)
 	if (lxc_sync_barrier_parent(handler, LXC_SYNC_CONFIGURE))
 		return -1;
 
+	if (read_unpriv_netifindex(&handler->conf->network) < 0)
+		goto out_warn_father;
+
 	/*
 	 * if we are in a new user namespace, become root there to have
 	 * privilege over our namespace
@@ -590,6 +662,11 @@ static int do_start(void *data)
 			SYSERROR("setgroups");
 			goto out_warn_father;
 		}
+	}
+
+	if (access(handler->lxcpath, X_OK)) {
+		print_top_failing_dir(handler->lxcpath);
+		goto out_warn_father;
 	}
 
 	#if HAVE_SYS_CAPABILITY_H
@@ -619,7 +696,12 @@ static int do_start(void *data)
 		lsm_label = handler->conf->lsm_se_context;
 	if (lsm_process_label_set(lsm_label, 1, 1) < 0)
 		goto out_warn_father;
-	lsm_proc_unmount(handler->conf);
+
+	if (lxc_check_inherited(handler->conf, handler->sigfd))
+		return -1;
+
+	/* If we mounted a temporary proc, then unmount it now */
+	tmp_proc_unmount(handler->conf);
 
 	if (lxc_seccomp_load(handler->conf) != 0)
 		goto out_warn_father;
@@ -691,8 +773,10 @@ static int lxc_spawn(struct lxc_handler *handler)
 {
 	int failed_before_rename = 0;
 	const char *name = handler->name;
+	bool cgroups_connected = false;
 	int saved_ns_fd[LXC_NS_MAX];
 	int preserve_mask = 0, i;
+	int netpipepair[2], nveths;
 
 	for (i = 0; i < LXC_NS_MAX; i++)
 		if (handler->conf->inherit_ns_fd[i] != -1)
@@ -759,6 +843,8 @@ static int lxc_spawn(struct lxc_handler *handler)
 		goto out_delete_net;
 	}
 
+	cgroups_connected = true;
+
 	if (!cgroup_create(handler)) {
 		ERROR("failed creating cgroups");
 		goto out_delete_net;
@@ -780,6 +866,15 @@ static int lxc_spawn(struct lxc_handler *handler)
 		goto out_delete_net;
 	if (attach_ns(handler->conf->inherit_ns_fd) < 0)
 		goto out_delete_net;
+
+	if (am_unpriv() && (nveths = count_veths(&handler->conf->network))) {
+		if (pipe(netpipepair) < 0) {
+			SYSERROR("Error creating pipe");
+			goto out_delete_net;
+		}
+		/* store netpipe in the global var for do_start's use */
+		netpipe = netpipepair[0];
+	}
 
 	/* Create a process in a new set of namespaces */
 	handler->pid = lxc_clone(do_start, handler, handler->clone_flags);
@@ -822,6 +917,23 @@ static int lxc_spawn(struct lxc_handler *handler)
 		}
 	}
 
+	if (netpipe != -1) {
+		struct lxc_list *iterator;
+		struct lxc_netdev *netdev;
+
+		close(netpipe);
+		lxc_list_for_each(iterator, &handler->conf->network) {
+			netdev = iterator->elem;
+			if (netdev->type != LXC_NET_VETH)
+				continue;
+			if (write(netpipepair[1], netdev->name, IFNAMSIZ) != IFNAMSIZ) {
+				ERROR("Error writing veth name to container");
+				goto out_delete_net;
+			}
+		}
+		close(netpipepair[1]);
+	}
+
 	/* map the container uids - the container became an invalid
 	 * userid the moment it was cloned with CLONE_NEWUSER - this
 	 * call doesn't change anything immediately, but allows the
@@ -842,6 +954,9 @@ static int lxc_spawn(struct lxc_handler *handler)
 		ERROR("failed to setup the devices cgroup for '%s'", name);
 		goto out_delete_net;
 	}
+
+	cgroup_disconnect();
+	cgroups_connected = false;
 
 	/* Tell the child to complete its initialization and wait for
 	 * it to exec or return an error.  (the child will never
@@ -870,6 +985,8 @@ static int lxc_spawn(struct lxc_handler *handler)
 	return 0;
 
 out_delete_net:
+	if (cgroups_connected)
+		cgroup_disconnect();
 	if (handler->clone_flags & CLONE_NEWNET)
 		lxc_delete_network(handler);
 out_abort:
@@ -883,12 +1000,33 @@ out_abort:
 	return -1;
 }
 
+int get_netns_fd(int pid)
+{
+	char path[MAXPATHLEN];
+	int ret, fd;
+
+	ret = snprintf(path, MAXPATHLEN, "/proc/%d/ns/net", pid);
+	if (ret < 0 || ret >= MAXPATHLEN) {
+		WARN("Failed to pin netns file for pid %d", pid);
+		return -1;
+	}
+
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		WARN("Failed to pin netns file %s for pid %d: %s",
+				path, pid, strerror(errno));
+		return -1;
+	}
+	return fd;
+}
+
 int __lxc_start(const char *name, struct lxc_conf *conf,
 		struct lxc_operations* ops, void *data, const char *lxcpath)
 {
 	struct lxc_handler *handler;
 	int err = -1;
 	int status;
+	int netnsfd = -1;
 
 	handler = lxc_init(name, conf, lxcpath);
 	if (!handler) {
@@ -915,9 +1053,13 @@ int __lxc_start(const char *name, struct lxc_conf *conf,
 		goto out_fini_nonet;
 	}
 
+	netnsfd = get_netns_fd(handler->pid);
+
 	err = lxc_poll(name, handler);
 	if (err) {
 		ERROR("mainloop exited with an error");
+		if (netnsfd >= 0)
+			close(netnsfd);
 		goto out_abort;
 	}
 
@@ -939,13 +1081,18 @@ int __lxc_start(const char *name, struct lxc_conf *conf,
 			DEBUG("Container rebooting");
 			handler->conf->reboot = 1;
 			break;
+		case SIGSYS: /* seccomp */
+			DEBUG("Container violated its seccomp policy");
+			break;
 		default:
 			DEBUG("unknown exit status for init: %d", WTERMSIG(status));
 			break;
 		}
         }
 
-	lxc_rename_phys_nics_on_shutdown(handler->conf);
+	lxc_rename_phys_nics_on_shutdown(netnsfd, handler->conf);
+	if (netnsfd >= 0)
+		close(netnsfd);
 
 	if (handler->pinfd >= 0) {
 		close(handler->pinfd);
@@ -999,9 +1146,6 @@ int lxc_start(const char *name, char *const argv[], struct lxc_conf *conf,
 	struct start_args start_arg = {
 		.argv = argv,
 	};
-
-	if (lxc_check_inherited(conf, -1))
-		return -1;
 
 	conf->need_utmp_watch = 1;
 	return __lxc_start(name, conf, &start_ops, &start_arg, lxcpath);

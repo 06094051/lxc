@@ -22,6 +22,7 @@
  */
 
 #define _GNU_SOURCE
+#include <assert.h>
 #include <sys/wait.h>
 #include <sys/types.h>
 #include <stdlib.h>
@@ -64,6 +65,8 @@ static int add_to_simple_array(char ***array, ssize_t *capacity, char *value)
 {
 	ssize_t count = 0;
 
+	assert(array);
+
 	if (*array)
 		for (; (*array)[count]; count++);
 
@@ -77,6 +80,8 @@ static int add_to_simple_array(char ***array, ssize_t *capacity, char *value)
 		*array = new_array;
 		*capacity = new_capacity;
 	}
+
+	assert(*array);
 
 	(*array)[count] = value;
 	return 0;

@@ -51,6 +51,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
             <arg choice="opt">-r</arg>
             <arg choice="opt">-s</arg>
             <arg choice="opt">-a</arg>
+            <arg choice="opt">-A</arg>
             <arg choice="opt">-g <replaceable>groups</replaceable></arg>
             <arg choice="opt">-t <replaceable>timeout</replaceable></arg>
         </cmdsynopsis>
@@ -143,6 +144,41 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
                 <listitem>
                     <para>
                         Wait TIMEOUT seconds before hard-stopping the container.
+                    </para>
+                </listitem>
+            </varlistentry>
+
+            <varlistentry>
+                <term>
+                    <option>-g,--group <replaceable>GROUP</replaceable></option>
+                </term>
+                <listitem>
+                    <para>
+                        Comma separate list of groups to select
+                        (defaults to those without a lxc.group).
+                    </para>
+                </listitem>
+            </varlistentry>
+
+            <varlistentry>
+                <term>
+                    <option>-a,--all</option>
+                </term>
+                <listitem>
+                    <para>
+                        Ignore lxc.group and select all auto-started containers.
+                    </para>
+                </listitem>
+            </varlistentry>
+
+            <varlistentry>
+                <term>
+                    <option>-A,--ignore-auto</option>
+                </term>
+                <listitem>
+                    <para>
+                        Ignore the lxc.start.auto flag. Combined with
+                        -a, will select all containers on the system.
                     </para>
                 </listitem>
             </varlistentry>

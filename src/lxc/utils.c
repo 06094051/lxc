@@ -245,7 +245,7 @@ const char *lxc_global_config_value(const char *option_name)
 		{ NULL, NULL },
 	};
 
-	/* placed in the thread local storage pool for non-bionic targets */	
+	/* placed in the thread local storage pool for non-bionic targets */
 #ifdef HAVE_TLS
 	static __thread const char *values[sizeof(options) / sizeof(options[0])] = { 0 };
 #else
@@ -376,13 +376,32 @@ out:
 	return values[i];
 }
 
-const char *get_rundir()
+char *get_rundir()
 {
-	const char *rundir;
+	char *rundir;
+	const char *homedir;
+
+	if (geteuid() == 0) {
+		rundir = strdup(RUNTIME_PATH);
+		return rundir;
+	}
 
 	rundir = getenv("XDG_RUNTIME_DIR");
-	if (geteuid() == 0 || rundir == NULL)
-		rundir = "/run";
+	if (rundir) {
+		rundir = strdup(rundir);
+		return rundir;
+	}
+
+	INFO("XDG_RUNTIME_DIR isn't set in the environment.");
+	homedir = getenv("HOME");
+	if (!homedir) {
+		ERROR("HOME isn't set in the environment.");
+		return NULL;
+	}
+
+	rundir = malloc(sizeof(char) * (17 + strlen(homedir)));
+	sprintf(rundir, "%s/.cache/lxc/run/", homedir);
+
 	return rundir;
 }
 
@@ -642,7 +661,10 @@ extern struct lxc_popen_FILE *lxc_popen(const char *command)
 			 * But it must not be marked close-on-exec.
 			 * Undo the effects.
 			 */
-			fcntl(child_end, F_SETFD, 0);
+			if (fcntl(child_end, F_SETFD, 0) != 0) {
+				SYSERROR("Failed to remove FD_CLOEXEC from fd.");
+				exit(127);
+			}
 		}
 
 		/*
@@ -1147,4 +1169,142 @@ bool dir_exists(const char *path)
 		// could be something other than eexist, just say no
 		return false;
 	return S_ISDIR(sb.st_mode);
+}
+
+/* Note we don't use SHA-1 here as we don't want to depend on HAVE_GNUTLS.
+ * FNV has good anti collision properties and we're not worried
+ * about pre-image resistance or one-way-ness, we're just trying to make
+ * the name unique in the 108 bytes of space we have.
+ */
+uint64_t fnv_64a_buf(void *buf, size_t len, uint64_t hval)
+{
+	unsigned char *bp;
+
+	for(bp = buf; bp < (unsigned char *)buf + len; bp++)
+	{
+		/* xor the bottom with the current octet */
+		hval ^= (uint64_t)*bp;
+
+		/* gcc optimised:
+		 * multiply by the 64 bit FNV magic prime mod 2^64
+		 */
+		hval += (hval << 1) + (hval << 4) + (hval << 5) +
+			(hval << 7) + (hval << 8) + (hval << 40);
+	}
+
+	return hval;
+}
+
+/*
+ * Detect whether / is mounted MS_SHARED.  The only way I know of to
+ * check that is through /proc/self/mountinfo.
+ * I'm only checking for /.  If the container rootfs or mount location
+ * is MS_SHARED, but not '/', then you're out of luck - figuring that
+ * out would be too much work to be worth it.
+ */
+#define LINELEN 4096
+int detect_shared_rootfs(void)
+{
+	char buf[LINELEN], *p;
+	FILE *f;
+	int i;
+	char *p2;
+
+	f = fopen("/proc/self/mountinfo", "r");
+	if (!f)
+		return 0;
+	while (fgets(buf, LINELEN, f)) {
+		for (p = buf, i=0; p && i < 4; i++)
+			p = strchr(p+1, ' ');
+		if (!p)
+			continue;
+		p2 = strchr(p+1, ' ');
+		if (!p2)
+			continue;
+		*p2 = '\0';
+		if (strcmp(p+1, "/") == 0) {
+			// this is '/'.  is it shared?
+			p = strchr(p2+1, ' ');
+			if (p && strstr(p, "shared:")) {
+				fclose(f);
+				return 1;
+			}
+		}
+	}
+	fclose(f);
+	return 0;
+}
+
+/*
+ * looking at fs/proc_namespace.c, it appears we can
+ * actually expect the rootfs entry to very specifically contain
+ * " - rootfs rootfs "
+ * IIUC, so long as we've chrooted so that rootfs is not our root,
+ * the rootfs entry should always be skipped in mountinfo contents.
+ */
+int detect_ramfs_rootfs(void)
+{
+	char buf[LINELEN], *p;
+	FILE *f;
+	int i;
+	char *p2;
+
+	f = fopen("/proc/self/mountinfo", "r");
+	if (!f)
+		return 0;
+	while (fgets(buf, LINELEN, f)) {
+		for (p = buf, i=0; p && i < 4; i++)
+			p = strchr(p+1, ' ');
+		if (!p)
+			continue;
+		p2 = strchr(p+1, ' ');
+		if (!p2)
+			continue;
+		*p2 = '\0';
+		if (strcmp(p+1, "/") == 0) {
+			// this is '/'.  is it the ramfs?
+			p = strchr(p2+1, '-');
+			if (p && strncmp(p, "- rootfs rootfs ", 16) == 0) {
+				fclose(f);
+				return 1;
+			}
+		}
+	}
+	fclose(f);
+	return 0;
+}
+
+bool on_path(char *cmd) {
+	char *path = NULL;
+	char *entry = NULL;
+	char *saveptr = NULL;
+	char cmdpath[MAXPATHLEN];
+	int ret;
+
+	path = getenv("PATH");
+	if (!path)
+		return false;
+
+	path = strdup(path);
+	if (!path)
+		return false;
+
+	entry = strtok_r(path, ":", &saveptr);
+	while (entry) {
+		ret = snprintf(cmdpath, MAXPATHLEN, "%s/%s", entry, cmd);
+
+		if (ret < 0 || ret >= MAXPATHLEN)
+			goto next_loop;
+
+		if (access(cmdpath, X_OK) == 0) {
+			free(path);
+			return true;
+		}
+
+next_loop:
+		entry = strtok_r(NULL, ":", &saveptr);
+	}
+
+	free(path);
+	return false;
 }
