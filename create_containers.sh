@@ -1,4 +1,8 @@
 #! /bin/bash
+subnet=192.168.122
+container_prefix=lxc
+domain_suffix=example.com
+
 usage() 
 {
     echo "Description: create multiple containers."
@@ -33,9 +37,9 @@ tmpfile=$(mktemp)
 
 # create the containers
 for idx in $(get_seq $num_machine);do
-    container_name=hadoop$idx
-    fqdn=$container_name.gopivotal.com
-    ip=192.168.122.$idx
+    container_name=${container_prefix}$idx
+    fqdn=$container_name.${domain_suffix}
+    ip=${subnet}.$idx
 
     # check if the container exists
     lxc-info -n $container_name > /dev/null 2>&1
@@ -45,7 +49,7 @@ for idx in $(get_seq $num_machine);do
     fi
 
     echo "Creating container $container_name..."
-    root_password="P@ssw0rd" lxc-create -t centos -n $container_name -- --ip $ip --gw 192.168.122.1 --fqdn $fqdn -E -s
+    root_password="P@ssw0rd" lxc-create -t centos -n $container_name -- --ip $ip --gw ${subnet}.1 --fqdn $fqdn -E -s
 
     # append the mapping to /etc/hosts
     grep $container_name /etc/hosts > /dev/null 2>&1 || echo "$ip $fqdn $container_name" >> /etc/hosts
@@ -56,7 +60,7 @@ done
 
 # enable the containers can resolve to each other
 for idx in $(get_seq $num_machine);do
-    container_name=hadoop$idx
+    container_name=${container_prefix}$idx
     cat $tmpfile >> /usr/local/var/lib/lxc/$container_name/rootfs/etc/hosts
 done
 
