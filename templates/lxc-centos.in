@@ -401,7 +401,7 @@ download_centos()
     # download a mini centos into a cache
     echo "Downloading centos minimal ..."
     YUM="yum --installroot $INSTALL_ROOT -y --nogpgcheck"
-    PKG_LIST="yum initscripts passwd rsyslog vim-minimal openssh-server openssh-clients dhclient chkconfig rootfiles policycoreutils wget tar sudo zip unzip which"
+    PKG_LIST="yum initscripts passwd rsyslog vim openssh-server openssh-clients dhclient chkconfig rootfiles policycoreutils wget tar sudo zip unzip which"
 
     # use temporary repository definition
     REPO_FILE=$INSTALL_ROOT/etc/yum.repos.d/lxc-centos-temp.repo
@@ -690,12 +690,16 @@ copy_ssh_key_to_container()
         chmod 700 $container_ssh_dir
     fi
     
-    # copy the public key to authorized_keys 
+    # copy the id_rsa.pub to authorized_keys if exists
     my_ssh_id=$HOME/.ssh/id_rsa.pub
     if [ -f $my_ssh_id ];then
         cat $my_ssh_id >> $container_ssh_dir/authorized_keys
-    else
-        echo "No public key found under $HOME/.ssh folder."
+    fi
+
+    # copy the id_dsa.pub to authorized_keys if exists
+    my_ssh_id=$HOME/.ssh/id_dsa.pub
+    if [ -f $my_ssh_id ];then
+        cat $my_ssh_id >> $container_ssh_dir/authorized_keys
     fi
 }
 
