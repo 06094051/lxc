@@ -49,7 +49,7 @@ for idx in $(get_seq $num_machine);do
     fi
 
     echo "Creating container $container_name..."
-    root_password="P@ssw0rd" lxc-create -t centos -n $container_name -- --ip $ip --gw ${subnet}.1 --fqdn $fqdn -E -s
+    root_password="welcome" lxc-create -t centos -n $container_name -- --ip $ip --gw ${subnet}.1 --fqdn $fqdn -E -s
 
     # append the mapping to /etc/hosts
     grep $container_name /etc/hosts > /dev/null 2>&1 || echo "$ip $fqdn $container_name" >> /etc/hosts
